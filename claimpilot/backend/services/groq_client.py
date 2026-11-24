@@ -1,101 +1,118 @@
-# Groq API wrapper — initializes the Groq client and provides helper functions for LLM calls
-
 import os
 import base64
 import json
 import re
+import logging
+
+import httpx
 from groq import Groq
 from dotenv import load_dotenv
 
-# Load .env file so GROQ_API_KEY is available when running locally
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Client initialisation — lazy so a missing key doesn't crash on import
-# ---------------------------------------------------------------------------
+# Load environment variables
+BASE_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-VISION_MODEL = "qwen/qwen3.6-27b"
-TEXT_MODEL    = "openai/gpt-oss-120b"
+# Groq model configuration
+VISION_MODEL = "qwen/qwen3.8-27b"
+TEXT_MODEL = "openai/gpt-oss-120b"
 
-_client: Groq | None = None
+_client = None
 
-def _get_client() -> Groq | None:
-    """
-    Return the shared Groq client, initialising it on first use.
-    Returns None (and logs a warning) if GROQ_API_KEY is not set,
-    so the server starts cleanly and routes fall back gracefully.
-    """
+
+def _get_client():
+    """Initialize Groq client lazily."""
+
     global _client
+
     if _client is not None:
         return _client
-    api_key = os.environ.get("GROQ_API_KEY", "")
+
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+
     if not api_key:
-        print("[groq_client] WARNING: GROQ_API_KEY is not set. "
-              "AI calls will return None and routes will use fallbacks.")
+        logger.warning("GROQ_API_KEY is not configured.")
         return None
-    _client = Groq(api_key=api_key)
-    return _client
+
+    try:
+        http_client = httpx.Client(timeout=30.0)
+        _client = Groq(api_key=api_key, http_client=http_client)
+        return _client
+
+    except Exception:
+        logger.exception("Groq client initialization failed.")
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
+def _parse_json_response(raw_text):
+    """Extract and parse JSON from an LLM response."""
 
-def _parse_json_response(raw_text: str) -> dict | None:
-    """
-    Strip <think>...</think> reasoning blocks (used by thinking-mode
-    models like qwen3.6-27b) and optional markdown code fences, then
-    parse the remaining text as JSON.
-    Returns the parsed dict, or None if parsing fails.
-    """
+    if not raw_text:
+        return None
+
     text = raw_text.strip()
 
-    # Strip <think>...</think> reasoning block, if present anywhere.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Remove thinking blocks
+    text = re.sub(
+        r"<think>.*?</think>",
+        "",
+        text,
+        flags=re.DOTALL
+    ).strip()
 
-    # Strip ```json ... ``` or ``` ... ``` fences, anchored or not.
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    # Remove Markdown code fences
+    fenced = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
     if fenced:
         text = fenced.group(1).strip()
 
-    # Last-resort fallback: grab the first {...} block in the text.
+    # Extract JSON object if additional text exists
     if not text.startswith("{"):
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            text = brace_match.group(0)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+
+        if match:
+            text = match.group(0)
 
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        print(f"[groq_client] JSON parse error: {exc}")
-        print(f"[groq_client] Raw response was: {raw_text!r}")
+        result = json.loads(text)
+
+        if isinstance(result, dict):
+            return result
+
+        return None
+
+    except json.JSONDecodeError:
+        logger.warning("Groq returned invalid JSON.")
+        logger.debug("Raw response: %r", raw_text)
         return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def analyze_image(image_bytes: bytes, content_type: str, prompt: str) -> dict | None:
-    """
-    Send an image + text prompt to the Llama 4 Scout vision model.
-
-    Args:
-        image_bytes:  Raw bytes of the uploaded image.
-        content_type: MIME type, e.g. "image/jpeg" or "image/png".
-        prompt:       Text instruction for the model.
-
-    Returns:
-        Parsed dict from the model's JSON response, or None on error.
-    """
-    encoded = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:{content_type};base64,{encoded}"
-
-    client = _get_client()
-    if client is None:
-        return None
+def analyze_image(image_bytes, content_type, prompt):
+    """Analyze an uploaded document using Groq vision."""
 
     try:
+        client = _get_client()
+
+        if client is None:
+            return None
+
+        if not image_bytes:
+            logger.warning("Empty image received.")
+            return None
+
+        encoded = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
+
+        data_url = f"data:{content_type};base64,{encoded}"
+
         response = client.chat.completions.create(
             model=VISION_MODEL,
             messages=[
@@ -104,57 +121,58 @@ def analyze_image(image_bytes: bytes, content_type: str, prompt: str) -> dict | 
                     "content": [
                         {
                             "type": "text",
-                            "text": prompt,
+                            "text": prompt
                         },
                         {
                             "type": "image_url",
-                            "image_url": {"url": data_url},
-                        },
-                    ],
+                            "image_url": {
+                                "url": data_url
+                            }
+                        }
+                    ]
                 }
             ],
             temperature=0.2,
             max_tokens=3000,
+            response_format={
+                "type": "json_object"
+            }
         )
 
         raw_text = response.choices[0].message.content
+
         return _parse_json_response(raw_text)
 
-    except Exception as exc:
-        print(f"[groq_client] analyze_image exception: {exc}")
+    except Exception:
+        logger.exception("Groq image analysis failed.")
         return None
 
 
-def analyze_text(prompt: str) -> dict | None:
-    """
-    Send a plain text prompt to the text-only reasoning model.
-
-    Args:
-        prompt: Full instruction string for the model.
-
-    Returns:
-        Parsed dict from the model's JSON response, or None on error.
-    """
-    client = _get_client()
-    if client is None:
-        return None
+def analyze_text(prompt):
+    """Analyze text using Groq language model."""
 
     try:
+        client = _get_client()
+
+        if client is None:
+            return None
+
         response = client.chat.completions.create(
             model=TEXT_MODEL,
             messages=[
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": prompt
                 }
             ],
             temperature=0.2,
-            max_tokens=500,
+            max_tokens=500
         )
 
         raw_text = response.choices[0].message.content
+
         return _parse_json_response(raw_text)
 
-    except Exception as exc:
-        print(f"[groq_client] analyze_text exception: {exc}")
+    except Exception:
+        logger.exception("Groq text analysis failed.")
         return None
