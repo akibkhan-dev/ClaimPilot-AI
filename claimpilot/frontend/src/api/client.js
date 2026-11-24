@@ -1,7 +1,11 @@
 // API client — centralizes all fetch calls from the frontend to the FastAPI backend
-// Uses relative "/api/..." paths — works in dev (Vite proxy) and prod (StaticFiles)
+// Uses VITE_API_URL when set, falls back to Render backend in production, or "" for Vite proxy in dev
 
-const BASE = "";   // empty = same origin; Vite proxy forwards /api → localhost:8000
+const rawBase =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? "" : "https://claimpilot-backend-xy85.onrender.com");
+
+const BASE = rawBase.replace(/\/+$/, "");
 
 /**
  * POST /api/analyze-damage
