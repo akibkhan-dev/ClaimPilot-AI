@@ -1,0 +1,14 @@
+# Python dependencies — lists all packages required to run the ClaimPilot AI backend
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+sqlalchemy>=2.0.30
+groq==0.9.0
+python-multipart==0.0.9
+python-dotenv==1.0.1
+# Module A primary path — trained model inference (YOLO + RandomForest)
+ultralytics>=8.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+# Module B primary path — OCR + rule checks (needs the Tesseract binary too, see README)
+pytesseract>=0.3.10
+Pillow>=10.0.0

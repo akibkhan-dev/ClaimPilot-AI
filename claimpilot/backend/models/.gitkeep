@@ -1,0 +1,6 @@
+# Place your trained models here:
+#   damage_yolo.pt        — YOLOv8-seg model for damage detection
+#   cost_regressor.pkl    — joblib-serialised RandomForestRegressor bundle
+#
+# Both files are intentionally excluded from version control.
+# The server will start without them and fall back to the Groq LLM path.
